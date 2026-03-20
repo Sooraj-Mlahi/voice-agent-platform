@@ -2,6 +2,8 @@
 Reseller auth dependency.
 Extracts and validates Supabase JWT from the Authorization header,
 returning the reseller's user ID.
+
+Set DEV_MODE=true in .env to bypass JWT verification during local development.
 """
 from __future__ import annotations
 
@@ -20,12 +22,21 @@ async def get_current_reseller(
     """
     Validate the Bearer JWT and return the reseller's user ID (sub claim).
 
-    Falls back to decoding without verification when SUPABASE_JWT_SECRET is
-    not configured — useful during local development.
+    - DEV_MODE=true  → skip all verification, return sub claim as-is
+    - SUPABASE_JWT_SECRET set → verify signature with Supabase secret
+    - neither set → decode without verification (legacy dev fallback)
     """
     token = credentials.credentials
     try:
-        if settings.supabase_jwt_secret:
+        if settings.dev_mode:
+            # No verification at all — any JWT with a sub claim works
+            payload = jwt.decode(
+                token,
+                key="",
+                options={"verify_signature": False, "verify_aud": False},
+                algorithms=["HS256"],
+            )
+        elif settings.supabase_jwt_secret:
             payload = jwt.decode(
                 token,
                 settings.supabase_jwt_secret,
@@ -33,12 +44,14 @@ async def get_current_reseller(
                 options={"verify_aud": False},
             )
         else:
-            # Dev mode: decode without verification
+            # Fallback dev mode when no secret is configured
             payload = jwt.decode(
                 token,
+                key="",
                 options={"verify_signature": False, "verify_aud": False},
                 algorithms=["HS256"],
             )
+
         user_id: str | None = payload.get("sub")
         if not user_id:
             raise HTTPException(

@@ -35,31 +35,38 @@ async def create_customer(
     """
     db = get_supabase()
 
-    # --- Step 1: Create Retell agent ---
-    try:
-        retell_response = await retell.create_retell_agent(
-            agent_name=body.business_name or body.name,
-            system_prompt=body.agent_config.system_prompt,
-            voice_id=body.agent_config.voice_id,
-            language=body.agent_config.language,
-        )
-    except Exception as exc:
-        logger.exception("Retell agent creation failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to create Retell agent: {exc}",
-        ) from exc
+    retell_agent_id = body.retell_agent_id
 
-    retell_agent_id: str = retell_response.get("agent_id", "")
+    # --- Step 1: Create Retell agent (if not provided) ---
+    if not retell_agent_id:
+        try:
+            retell_response = await retell.create_retell_agent(
+                agent_name=body.name,
+                system_prompt=body.agent_config.system_prompt or "",
+                voice_id=body.agent_config.voice_id or "11labs-Adrian",
+                language=body.agent_config.language,
+            )
+            retell_agent_id = retell_response.get("agent_id", "")
+        except Exception as exc:
+            err_msg = str(exc)
+            if hasattr(exc, "response") and hasattr(exc.response, "text"):
+                err_msg = f"{exc} - Body: {exc.response.text}"
+                
+            logger.exception("Retell agent creation failed: %s", err_msg)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to create Retell agent. Retell said: {err_msg}",
+            ) from exc
 
     # --- Step 2: Persist to Supabase ---
     record = {
         "name": body.name,
         "phone_number": body.phone_number,
-        "business_name": body.business_name,
+        "billing_email": body.billing_email,
+        "plan": body.plan,
+        "status": body.status,
         "reseller_id": reseller_id,
         "retell_agent_id": retell_agent_id,
-        "agent_config": body.agent_config.model_dump(),
     }
 
     try:
@@ -77,7 +84,32 @@ async def create_customer(
             detail="Customer insert returned no data",
         )
 
-    return result.data[0]
+    customer_data = result.data[0]
+    customer_id = customer_data["id"]
+
+    # --- Step 3: Persist Agent Config to agent_configs table ---
+    config_record = {
+        "customer_id": customer_id,
+        "system_prompt": body.agent_config.system_prompt,
+        "voice_id": body.agent_config.voice_id,
+        "language": body.agent_config.language,
+        "llm_model": body.agent_config.llm_model,
+        "business_hours": body.agent_config.business_hours,
+        "escalation_phone": body.agent_config.escalation_phone,
+        "calendar_webhook_url": body.agent_config.calendar_webhook_url,
+        "crm_webhook_url": body.agent_config.crm_webhook_url,
+        "faq_knowledge_base": body.agent_config.faq_knowledge_base,
+        "recording_enabled": body.agent_config.recording_enabled,
+    }
+
+    try:
+        db.table("agent_configs").insert(config_record).execute()
+    except Exception as exc:
+        logger.error("Failed to insert agent config: %s", exc)
+        # We don't fail the whole request if this fails, but it's bad state
+        pass
+
+    return customer_data
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +180,52 @@ async def update_agent_config(
     retell_agent_id: str = result.data.get("retell_agent_id", "")
     config = body.agent_config
 
-    # --- Step 1: Update Supabase ---
+    if not retell_agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Customer does not have an associated Retell agent to update.",
+        )
+
+    # We must fetch the llm_id dynamically from the Retell API
+    llm_id = None
+    try:
+        agent_data = await retell.get_retell_agent(retell_agent_id)
+        # Retell API v2 places llm_websocket_url linking to the LLM ID 
+        # But if we created it via create-agent, Retell returns the response_engine
+        response_engine = agent_data.get("response_engine", {})
+        llm_id = response_engine.get("llm_id")
+    except Exception as exc:
+        logger.warning("Could not fetch Retell Agent detail to find llm_id: %s", exc)
+
+    # --- Step 1: Update Supabase agent_configs table ---
+    config_update = {
+        "system_prompt": config.system_prompt,
+        "voice_id": config.voice_id,
+        "language": config.language,
+        "llm_model": config.llm_model,
+        "business_hours": config.business_hours,
+        "escalation_phone": config.escalation_phone,
+        "calendar_webhook_url": config.calendar_webhook_url,
+        "crm_webhook_url": config.crm_webhook_url,
+        "faq_knowledge_base": config.faq_knowledge_base,
+        "recording_enabled": config.recording_enabled,
+    }
+    
+    # We remove None keys so we don't accidentally overwrite good data with nulls when patching
+    config_update = {k: v for k, v in config_update.items() if v is not None}
+
     try:
         update_result = (
-            db.table("customers")
-            .update({"agent_config": config.model_dump()})
-            .eq("id", customer_id)
+            db.table("agent_configs")
+            .update(config_update)
+            .eq("customer_id", customer_id)
             .execute()
         )
     except Exception as exc:
-        logger.exception("Supabase update failed: %s", exc)
+        logger.exception("Supabase agent_configs update failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update customer config: {exc}",
+            detail=f"Failed to update agent config in database: {exc}",
         ) from exc
 
     # --- Step 2: Update Retell agent ---
@@ -168,9 +233,10 @@ async def update_agent_config(
         try:
             await retell.update_retell_agent(
                 retell_agent_id=retell_agent_id,
-                system_prompt=config.system_prompt,
-                voice_id=config.voice_id,
-                language=config.language,
+                system_prompt=config.system_prompt or "",
+                voice_id=config.voice_id or "11labs-Adrian",
+                language=config.language or "en",
+                llm_id=llm_id,
             )
         except Exception as exc:
             logger.exception("Retell agent update failed: %s", exc)

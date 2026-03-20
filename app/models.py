@@ -34,17 +34,25 @@ class RetellWebhookRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 class AgentConfig(BaseModel):
-    system_prompt: str = Field(..., description="System prompt used for the LLM")
-    voice_id: str = Field(default="11labs-Adrian", description="Retell voice ID")
+    system_prompt: str | None = Field(default=None)
+    voice_id: str | None = Field(default="11labs-Adrian")
     language: str = Field(default="en-US")
-    model: str = Field(default="openai/gpt-4o-mini", description="OpenRouter model slug")
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    llm_model: str = Field(default="gpt-4o")
+    business_hours: dict[str, Any] | None = Field(default=None)
+    escalation_phone: str | None = Field(default=None)
+    calendar_webhook_url: str | None = Field(default=None)
+    crm_webhook_url: str | None = Field(default=None)
+    faq_knowledge_base: str | None = Field(default=None)
+    recording_enabled: bool = Field(default=False)
 
 
 class CreateCustomerRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    phone_number: str = Field(..., description="E.164 format, e.g. +14155552671")
-    business_name: str = Field(default="")
+    billing_email: str = Field(..., description="Customer billing email")
+    phone_number: str | None = Field(default=None, description="E.164 format")
+    plan: str = Field(default="starter")
+    status: str = Field(default="active")
+    retell_agent_id: str | None = Field(default=None, description="If provided, links to an existing Retell Agent instead of creating a new one.")
     agent_config: AgentConfig
 
 
@@ -58,23 +66,24 @@ class UpdateAgentConfigRequest(BaseModel):
 
 class CustomerResponse(BaseModel):
     id: str
-    name: str
-    phone_number: str
-    business_name: str
-    retell_agent_id: str | None
     reseller_id: str
-    agent_config: dict[str, Any]
+    name: str
+    billing_email: str
+    phone_number: str | None
+    plan: str
+    status: str
+    retell_agent_id: str | None
     created_at: str
 
 
 class CallLogResponse(BaseModel):
     id: str
-    call_id: str
-    agent_id: str
-    customer_id: str | None
-    reseller_id: str
-    transcript: list[dict[str, Any]]
+    customer_id: str
+    retell_call_id: str | None
+    caller_number: str | None
     duration_seconds: int | None
+    outcome: str | None
+    transcript: str | None
     started_at: str | None
     ended_at: str | None
-    created_at: str
+    cost_usd: float | None

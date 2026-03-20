@@ -23,14 +23,21 @@ async def list_calls(
     """Return all call logs belonging to the authenticated reseller."""
     try:
         db = get_supabase()
+        # Since the `calls` table doesn't have reseller_id, we join with `customers`
+        # and filter where customers.reseller_id == the logged in reseller
         result = (
-            db.table("call_logs")
-            .select("*")
-            .eq("reseller_id", reseller_id)
-            .order("created_at", desc=True)
+            db.table("calls")
+            .select("*, customers!inner(reseller_id)")
+            .eq("customers.reseller_id", reseller_id)
+            .order("started_at", desc=True)
             .execute()
         )
-        return result.data or []
+        # Remove the nested `customers` dict from the output for clean API responses
+        calls = result.data or []
+        for call in calls:
+            call.pop("customers", None)
+            
+        return calls
     except Exception as exc:
         logger.exception("Failed to fetch calls for reseller %s: %s", reseller_id, exc)
         raise HTTPException(
