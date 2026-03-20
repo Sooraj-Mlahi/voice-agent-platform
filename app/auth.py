@@ -29,37 +29,28 @@ async def get_current_reseller(
     token = credentials.credentials
     try:
         if settings.dev_mode:
-            # No verification at all — any JWT with a sub claim works
+            # Dev mode fallback: assume the token is valid if it has ANY subject
             payload = jwt.decode(
                 token,
                 key="",
                 options={"verify_signature": False, "verify_aud": False},
-                algorithms=["HS256"],
+                algorithms=["HS256", "RS256", "ES256"],
             )
-        elif settings.supabase_jwt_secret:
-            payload = jwt.decode(
-                token,
-                settings.supabase_jwt_secret,
-                algorithms=["HS256"],
-                options={"verify_aud": False},
-            )
-        else:
-            # Fallback dev mode when no secret is configured
-            payload = jwt.decode(
-                token,
-                key="",
-                options={"verify_signature": False, "verify_aud": False},
-                algorithms=["HS256"],
-            )
-
-        user_id: str | None = payload.get("sub")
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token missing subject claim",
-            )
-        return user_id
-    except JWTError as exc:
+            user_id = payload.get("sub")
+            if user_id: return user_id
+            
+        # Production: Let Supabase handle the ECC P-256 verification natively over the network
+        from app.database import get_supabase
+        supabase = get_supabase()
+        response = supabase.auth.get_user(token)
+        if response and response.user and response.user.id:
+            return response.user.id
+            
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalid or rejected by Supabase",
+        )
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid authentication token: {exc}",
