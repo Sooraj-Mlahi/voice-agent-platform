@@ -10,6 +10,7 @@ Handles real-time Retell AI webhook events:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -103,8 +104,15 @@ async def _log_call_to_supabase(
     elif "no_answer" in disc_reason.lower() or "timeout" in disc_reason.lower():
         outcome = "no_answer"
         
-    started_at = call.get("start_timestamp")
-    ended_at = call.get("end_timestamp")
+    started_at_ms = call.get("start_timestamp")
+    ended_at_ms = call.get("end_timestamp")
+    
+    started_at = None
+    ended_at = None
+    if started_at_ms:
+        started_at = datetime.fromtimestamp(started_at_ms / 1000.0, tz=timezone.utc).isoformat()
+    if ended_at_ms:
+        ended_at = datetime.fromtimestamp(ended_at_ms / 1000.0, tz=timezone.utc).isoformat()
 
     record = {
         "customer_id": customer_id,
