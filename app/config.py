@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_key: str
     supabase_jwt_secret: str = ""
+    webhook_base_url: str = ""
     dev_mode: bool = False
 
 

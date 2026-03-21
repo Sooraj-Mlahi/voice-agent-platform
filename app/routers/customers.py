@@ -246,3 +246,47 @@ async def update_agent_config(
             ) from exc
 
     return update_result.data[0] if update_result.data else {"status": "updated"}
+
+# ---------------------------------------------------------------------------
+# POST /api/customers/{customer_id}/web-call
+# ---------------------------------------------------------------------------
+
+@router.post("/customers/{customer_id}/web-call")
+async def create_web_call_for_customer(
+    customer_id: str,
+    reseller_id: str = Depends(get_current_reseller),
+) -> dict[str, Any]:
+    """
+    Creates a Retell WebRTC access token for browser-based calling.
+    """
+    db = get_supabase()
+    try:
+        result = (
+            db.table("customers")
+            .select("retell_agent_id")
+            .eq("id", customer_id)
+            .eq("reseller_id", reseller_id)
+            .single()
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query customer: {exc}"
+        ) from exc
+        
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+        
+    agent_id = result.data.get("retell_agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer has no agent")
+        
+    try:
+        return await retell.create_web_call(agent_id)
+    except Exception as exc:
+        logger.exception("Failed to create web call: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Retell Web Call creation failed: {exc}",
+        ) from exc

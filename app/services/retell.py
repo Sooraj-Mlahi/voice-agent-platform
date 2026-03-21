@@ -76,6 +76,10 @@ async def create_retell_agent(
         "voice_id": voice_id,
         "language": language,
     }
+    
+    if settings.webhook_base_url:
+        payload["webhook_url"] = f"{settings.webhook_base_url.rstrip('/')}/webhook/retell"
+        
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             f"{RETELL_BASE_URL}/create-agent",
@@ -142,6 +146,18 @@ async def get_retell_agent(agent_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
             f"{RETELL_BASE_URL}/get-agent/{agent_id}",
+            headers=_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+async def create_web_call(agent_id: str) -> dict[str, Any]:
+    """Create a new WebRTC call token for the browser."""
+    payload = {"agent_id": agent_id}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{RETELL_BASE_URL}/v2/create-web-call",
+            json=payload,
             headers=_headers(),
         )
         response.raise_for_status()
