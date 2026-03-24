@@ -28,6 +28,9 @@ from app.routers import calls, customers, webhook
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    # Explicit stdout so Railway's log collector does not mark startup
+    # messages as errors (Railway treats any stderr output as severity=error).
+    stream=__import__("sys").stdout,
 )
 logger = logging.getLogger(__name__)
 
