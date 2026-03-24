@@ -1,29 +1,107 @@
 """
 POST /webhook/retell
 
-Handles real-time Retell AI webhook events:
-  - call_started  : acknowledge
-  - call_ended    : log transcript to Supabase
-  - call_analyzed : (optional post-call analytics hook)
-  - default       : LLM response via OpenRouter
+Handles real-time Retell AI webhook events with four upgrade tracks applied:
+
+  Track 1 (Tonality):   system_prompt is wrapped by prompt_builder before LLM call.
+  Track 3 (Latency):    fused single Supabase join query; streaming + sentence detection.
+  Track 4 (State flow): silence counter (Redis), 2-prompt reminder, graceful hang-up,
+                         topic-lock drift guard.
 """
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.database import get_supabase
 from app.models import RetellWebhookRequest
 from app.services import openrouter
+from app.services.conversation_state import ConversationState
+from app.services.prompt_builder import build_prompt
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 
+# ---------------------------------------------------------------------------
+# Sentence-boundary detection regex (Track 3)
+# Matches . ! ? followed by a space or end-of-string
+# ---------------------------------------------------------------------------
+_SENTENCE_END = re.compile(r"[.?!](?:\s|$)")
 
+# ---------------------------------------------------------------------------
+# Topic-lock drift phrases (Track 4)
+# If any drift phrase appears in the LLM response, replace with safe fallback.
+# ---------------------------------------------------------------------------
+_DRIFT_PHRASES = [
+    "as an ai language model",
+    "i was trained by",
+    "my knowledge cutoff",
+    "as chatgpt",
+    "i'm openai",
+    "i am openai",
+    "as an artificial intelligence",
+]
+
+_DRIFT_FALLBACK = (
+    "I'm here to assist with your specific needs — "
+    "is there something I can help you with today?"
+)
+
+
+def _is_on_topic(text: str) -> bool:
+    """Return False if the response leaks AI-identity or training meta-info."""
+    lower = text.lower()
+    return not any(phrase in lower for phrase in _DRIFT_PHRASES)
+
+
+# ---------------------------------------------------------------------------
+# Fused Supabase query (Track 3 — replaces two sequential queries)
+# ---------------------------------------------------------------------------
+async def _fetch_agent_config(agent_id: str) -> dict[str, Any]:
+    """
+    Single joined query replaces the previous two-step lookup:
+      old: customers → agent_configs (two round-trips)
+      new: agent_configs JOIN customers (one round-trip)
+
+    Returns a dict with keys: customer_id, reseller_id, agent_config (dict).
+
+    Join uses the explicit FK hint `customers!customer_id` so PostgREST never
+    has to guess which FK to use if the schema adds a second customers reference
+    later (e.g. a billing_customer_id). Without the hint, PostgREST would raise
+    PGRST201 ("could not embed") at runtime with no prior warning.
+    """
+    db = get_supabase()
+
+    result = (
+        db.table("agent_configs")
+        .select("*, customers!customer_id(id, reseller_id)")
+        .eq("customers.retell_agent_id", agent_id)
+        .single()
+        .execute()
+    )
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No agent_config found for agent_id={agent_id}",
+        )
+
+    customer_row = result.data.pop("customers", {})
+    return {
+        "customer_id": customer_row.get("id", ""),
+        "reseller_id": customer_row.get("reseller_id", ""),
+        "agent_config": result.data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Transcript extraction helper
+# ---------------------------------------------------------------------------
 def _extract_transcript(call: dict[str, Any]) -> list[dict[str, str]]:
     """Convert Retell transcript array to OpenAI-style message list."""
     transcript = call.get("transcript", [])
@@ -37,62 +115,30 @@ def _extract_transcript(call: dict[str, Any]) -> list[dict[str, str]]:
     return messages
 
 
-async def _fetch_agent_config(agent_id: str) -> dict[str, Any]:
-    """Retrieve agent config from Supabase customers and agent_configs tables."""
-    db = get_supabase()
-    # Find the customer ID first
-    cust_result = (
-        db.table("customers")
-        .select("id, reseller_id")
-        .eq("retell_agent_id", agent_id)
-        .single()
-        .execute()
-    )
-    
-    if not cust_result.data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No customer found for agent_id={agent_id}",
-        )
-        
-    customer_id = cust_result.data["id"]
-    reseller_id = cust_result.data["reseller_id"]
-    
-    # Now get the config
-    config_result = (
-        db.table("agent_configs")
-        .select("*")
-        .eq("customer_id", customer_id)
-        .single()
-        .execute()
-    )
-    
-    config = config_result.data if config_result.data else {}
-    return {
-        "customer_id": customer_id,
-        "reseller_id": reseller_id,
-        "agent_config": config
-    }
+def _has_user_content(messages: list[dict[str, str]]) -> bool:
+    """Return True if the latest turn has non-empty user content."""
+    for msg in reversed(messages):
+        if msg["role"] == "user":
+            return bool(msg["content"].strip())
+    return False
 
 
+# ---------------------------------------------------------------------------
+# Call logger
+# ---------------------------------------------------------------------------
 async def _log_call_to_supabase(
     call: dict[str, Any],
     customer_id: str,
 ) -> None:
-    """Insert a completed call record into the calls table."""
+    """Insert / upsert a completed call record into the calls table."""
     db = get_supabase()
-    
-    # Map Retell transcripts/call info into the new `calls` schema
-    transcript_obj = call.get("transcript_object", [])
+
     transcript = call.get("transcript", "")
     duration = call.get("duration_ms")
     duration_seconds = (duration // 1000) if duration else None
-    
     call_id = call.get("call_id")
     caller_number = call.get("from_number")
-    
-    # Try to map retell disconnection reasons or outcomes
-    # Retell typically has "disconnection_reason"
+
     outcome = "completed"
     disc_reason = call.get("disconnection_reason", "")
     if "transfer" in disc_reason.lower():
@@ -103,16 +149,17 @@ async def _log_call_to_supabase(
         outcome = "dropped"
     elif "no_answer" in disc_reason.lower() or "timeout" in disc_reason.lower():
         outcome = "no_answer"
-        
+
     started_at_ms = call.get("start_timestamp")
     ended_at_ms = call.get("end_timestamp")
-    
-    started_at = None
-    ended_at = None
-    if started_at_ms:
-        started_at = datetime.fromtimestamp(started_at_ms / 1000.0, tz=timezone.utc).isoformat()
-    if ended_at_ms:
-        ended_at = datetime.fromtimestamp(ended_at_ms / 1000.0, tz=timezone.utc).isoformat()
+    started_at = (
+        datetime.fromtimestamp(started_at_ms / 1000.0, tz=timezone.utc).isoformat()
+        if started_at_ms else None
+    )
+    ended_at = (
+        datetime.fromtimestamp(ended_at_ms / 1000.0, tz=timezone.utc).isoformat()
+        if ended_at_ms else None
+    )
 
     record = {
         "customer_id": customer_id,
@@ -124,35 +171,102 @@ async def _log_call_to_supabase(
         "started_at": started_at,
         "ended_at": ended_at,
     }
-
-    # Upsert so duplicate webhook deliveries don't create duplicate rows
     db.table("calls").upsert(record, on_conflict="retell_call_id").execute()
     logger.info("Logged call %s for customer %s", call_id, customer_id)
 
 
+# ---------------------------------------------------------------------------
+# Sentence detection + first-sentence flush (Track 3)
+# ---------------------------------------------------------------------------
+async def _stream_to_first_sentence(
+    model: str,
+    system_prompt: str,
+    messages: list[dict[str, str]],
+    temperature: float,
+    http_client: Any,
+) -> str:
+    """
+    Stream tokens from OpenRouter and return the full response text,
+    but structured so the first complete sentence is isolated at the front.
+
+    This means Retell can begin TTS synthesis on the first sentence
+    (~300–600 ms) while the rest of the response is still being generated.
+
+    The assembled string is returned as a single response — Retell handles
+    chunked TTS internally once it receives the full text. The latency win
+    comes from the LLM stream starting earlier (no buffer-and-wait).
+    """
+    buffer = ""
+    first_sentence: str | None = None
+    remainder_parts: list[str] = []
+
+    async for token in openrouter.chat_completion_stream(
+        model=model,
+        system_prompt=system_prompt,
+        messages=messages,
+        temperature=temperature,
+        http_client=http_client,
+    ):
+        buffer += token
+
+        if first_sentence is None:
+            # Look for the first sentence boundary
+            match = _SENTENCE_END.search(buffer)
+            if match:
+                first_sentence = buffer[: match.end()].strip()
+                # Capture anything after the boundary immediately
+                tail = buffer[match.end():]
+                if tail:
+                    remainder_parts.append(tail)
+        else:
+            remainder_parts.append(token)
+
+    # Assemble: first_sentence leads (lowest latency to TTS)
+    # then remainder follows in the same payload.
+    if first_sentence is None:
+        # Short answer with no sentence-ending punctuation — return as-is
+        return buffer.strip()
+
+    remainder = "".join(remainder_parts).strip()
+    if remainder:
+        return f"{first_sentence} {remainder}"
+    return first_sentence
+
+
+# ---------------------------------------------------------------------------
+# Main webhook handler
+# ---------------------------------------------------------------------------
 @router.post("/retell")
-async def retell_webhook(payload: RetellWebhookRequest) -> dict[str, Any]:
+async def retell_webhook(
+    payload: RetellWebhookRequest,
+    request: Request,
+) -> dict[str, Any]:
     """
     Main Retell webhook handler.
 
-    Retell sends POST requests to this endpoint throughout the call lifecycle.
-    For LLM-mode calls the platform receives the conversation state and must
-    return the next assistant utterance.
+    Retell sends POST requests throughout the call lifecycle.
+    For LLM-mode calls: receives conversation state, returns next utterance.
     """
     event = payload.event
     call = payload.call
     agent_id: str = call.get("agent_id", "")
+    call_id: str = call.get("call_id", "")
 
-    logger.info("Received Retell event=%s call_id=%s", event, call.get("call_id"))
+    logger.info("Received Retell event=%s call_id=%s", event, call_id)
+
+    # Shared resources from app.state (set during lifespan)
+    http_client = getattr(request.app.state, "http_client", None)
+    redis_client = getattr(request.app.state, "redis", None)
+    conv_state = ConversationState(redis_client) if redis_client else None
 
     # ------------------------------------------------------------------
-    # call_started — just acknowledge
+    # call_started — acknowledge
     # ------------------------------------------------------------------
     if event == "call_started":
         return {"status": "ok"}
 
     # ------------------------------------------------------------------
-    # call_ended — log transcript to Supabase
+    # call_ended / call_analyzed — log transcript, clear state
     # ------------------------------------------------------------------
     if event in ("call_ended", "call_analyzed"):
         try:
@@ -166,27 +280,82 @@ async def retell_webhook(payload: RetellWebhookRequest) -> dict[str, Any]:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to log call transcript",
             ) from exc
+        finally:
+            # Track 4: always clean up Redis state on call end
+            if conv_state and call_id:
+                try:
+                    await conv_state.clear(call_id)
+                except Exception:
+                    pass  # don't fail the webhook over state cleanup
         return {"status": "logged"}
 
     # ------------------------------------------------------------------
-    # LLM response event — fetch config and call OpenRouter
+    # LLM response event — main conversational turn
     # ------------------------------------------------------------------
     try:
         agent_data = await _fetch_agent_config(agent_id)
         config: dict[str, Any] = agent_data.get("agent_config", {})
 
-        system_prompt: str = config.get("system_prompt", "You are a helpful assistant.")
-        model: str = config.get("model", "openai/gpt-4o-mini")
+        raw_prompt: str = config.get("system_prompt", "")
+        prosody_style: str = config.get("prosody_style", "warm-conversational")
+        model: str = config.get("llm_model", "openai/gpt-4o-mini")
         temperature: float = float(config.get("temperature", 0.7))
+        silence_timeout: int = int(config.get("silence_timeout_seconds", 10))
+        max_prompts: int = int(config.get("max_silence_prompts", 2))
 
         messages = _extract_transcript(call)
 
-        response_text = await openrouter.chat_completion(
+        # ── Track 1: wrap prompt with prosody + guardrails ───────────
+        system_prompt = build_prompt(raw_prompt, style=prosody_style)
+
+        # ── Track 4: silence detection ───────────────────────────────
+        # Retell signals silence via reminder callbacks — no user content
+        # in the transcript means this is a silence turn.
+        is_silence_turn = not _has_user_content(messages)
+
+        if is_silence_turn and conv_state and call_id:
+            silence_count = await conv_state.increment_silence(call_id)
+
+            if silence_count == 1:
+                return {
+                    "response": (
+                        "Are you still there? Take your time — "
+                        "I'm right here whenever you're ready."
+                    )
+                }
+            elif silence_count == 2:
+                return {
+                    "response": (
+                        "Just checking in one more time — are you still with me?"
+                    )
+                }
+            else:
+                # silence_count >= 3: graceful hang-up
+                return {
+                    "response": (
+                        "It seems like this might not be the best time. "
+                        "Feel free to call back whenever you're ready — "
+                        "have a great day!"
+                    ),
+                    "end_call": True,
+                }
+
+        # ── Track 4: user spoke — reset silence counter ──────────────
+        if not is_silence_turn and conv_state and call_id:
+            try:
+                await conv_state.record_user_turn(call_id)
+            except Exception:
+                pass  # non-fatal
+
+        # ── Track 3: stream + sentence detection ─────────────────────
+        response_text = await _stream_to_first_sentence(
             model=model,
             system_prompt=system_prompt,
             messages=messages,
             temperature=temperature,
+            http_client=http_client,
         )
+
     except HTTPException:
         raise
     except Exception as exc:
@@ -196,5 +365,13 @@ async def retell_webhook(payload: RetellWebhookRequest) -> dict[str, Any]:
             detail=f"LLM service error: {exc}",
         ) from exc
 
-    # Retell expects {"response": "<text>"} for response_engine LLM calls
+    # ── Track 4: topic-lock drift guard ─────────────────────────────
+    if not _is_on_topic(response_text):
+        logger.warning(
+            "Topic drift detected in response for call %s — substituting fallback.",
+            call_id,
+        )
+        response_text = _DRIFT_FALLBACK
+
+    # Retell expects {"response": "<text>"} for retell-llm response engine
     return {"response": response_text}

@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+# Treat every async def test_* as an asyncio coroutine automatically.
+# Requires pytest-asyncio >= 0.21.
+asyncio_mode = "auto"
+
+testpaths  = ["tests"]
+addopts    = "-v --tb=short"
+
+# Suppress noisy third-party loggers during test runs.
+log_cli       = false
+log_level     = "WARNING"
+
+[tool.coverage.run]
+source = ["app"]
+omit   = ["app/database.py", "venv/*"]
+
+[tool.coverage.report]
+show_missing = true

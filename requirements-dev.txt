@@ -1,0 +1,13 @@
+# ── Core test runner ────────────────────────────────────────────────────────
+pytest==8.1.1
+pytest-asyncio==0.23.6       # asyncio_mode = "auto" support
+pytest-cov==5.0.0            # coverage via --cov flag
+
+# ── Async Redis mock ─────────────────────────────────────────────────────────
+# fakeredis[aioredis] provides a redis.asyncio-compatible in-memory backend.
+# Pin to >=2.21 for pipeline + HINCRBY async support.
+fakeredis[aioredis]==2.23.3
+
+# ── HTTP mocking ─────────────────────────────────────────────────────────────
+# respx intercepts httpx calls at the transport layer — no monkey-patching.
+respx==0.21.1
