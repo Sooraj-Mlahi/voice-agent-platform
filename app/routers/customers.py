@@ -100,6 +100,11 @@ async def create_customer(
         "crm_webhook_url": body.agent_config.crm_webhook_url,
         "faq_knowledge_base": body.agent_config.faq_knowledge_base,
         "recording_enabled": body.agent_config.recording_enabled,
+        # Track 1 — Tonality
+        "prosody_style": body.agent_config.prosody_style,
+        # Track 4 — Silence / State-bound flow
+        "silence_timeout_seconds": body.agent_config.silence_timeout_seconds,
+        "max_silence_prompts": body.agent_config.max_silence_prompts,
     }
 
     try:
@@ -209,6 +214,11 @@ async def update_agent_config(
         "crm_webhook_url": config.crm_webhook_url,
         "faq_knowledge_base": config.faq_knowledge_base,
         "recording_enabled": config.recording_enabled,
+        # Track 1 — Tonality
+        "prosody_style": config.prosody_style,
+        # Track 4 — Silence / State-bound flow
+        "silence_timeout_seconds": config.silence_timeout_seconds,
+        "max_silence_prompts": config.max_silence_prompts,
     }
     
     # We remove None keys so we don't accidentally overwrite good data with nulls when patching
