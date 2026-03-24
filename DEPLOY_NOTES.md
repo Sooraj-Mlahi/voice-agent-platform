@@ -1,8 +1,89 @@
 # Production Deployment Guide — Voice Agent Platform
 
 > **Platform:** Railway (primary) / Render (alternative)
-> **Last updated:** 2026-03-24
+> **Last updated:** 2026-03-25
 > **Stack:** FastAPI · Retell AI · OpenRouter · Supabase · Redis
+> **Live URL:** `https://voice-agent-platform-production-86a4.up.railway.app`
+
+---
+
+## 0. Live Backend — Quick Access
+
+The service is deployed and running. Everything below is the real URL — no placeholders.
+
+### Interactive API docs (no auth required to browse)
+
+| Interface | URL |
+|---|---|
+| Swagger UI | `https://voice-agent-platform-production-86a4.up.railway.app/docs` |
+| ReDoc | `https://voice-agent-platform-production-86a4.up.railway.app/redoc` |
+| Health check | `https://voice-agent-platform-production-86a4.up.railway.app/health` |
+
+Open `/docs` in a browser to see every endpoint, try requests interactively, and inspect request/response schemas live.
+
+### Base URL for the frontend
+
+```
+https://voice-agent-platform-production-86a4.up.railway.app
+```
+
+All protected endpoints are under `/api/*`. The public webhook endpoint is `/webhook/retell`.
+
+### Smoke-test the live service right now
+
+```bash
+# 1. Health — no auth needed
+curl https://voice-agent-platform-production-86a4.up.railway.app/health
+# → {"status":"ok"}
+
+# 2. Confirm 401 is returned without a token (auth is working)
+curl https://voice-agent-platform-production-86a4.up.railway.app/api/customers
+# → {"detail":"Not authenticated"}
+
+# 3. Confirm Retell webhook endpoint accepts call_started
+curl -X POST https://voice-agent-platform-production-86a4.up.railway.app/webhook/retell \
+  -H "Content-Type: application/json" \
+  -d '{"event":"call_started","call":{"agent_id":"test","call_id":"test"}}'
+# → {"status":"ok"}
+```
+
+### Making an authenticated request from a terminal
+
+Get your Supabase JWT first (sign in via the Supabase dashboard or your frontend), then:
+
+```bash
+TOKEN="eyJhbGc..."   # paste your JWT here
+
+# List your customers
+curl https://voice-agent-platform-production-86a4.up.railway.app/api/customers \
+  -H "Authorization: Bearer $TOKEN"
+
+# List call logs
+curl https://voice-agent-platform-production-86a4.up.railway.app/api/calls \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Authenticating in Swagger UI
+
+1. Open `https://voice-agent-platform-production-86a4.up.railway.app/docs`
+2. Click **Authorize** (top right, padlock icon)
+3. In the `HTTPBearer` field paste your Supabase JWT
+4. Click **Authorize → Close**
+5. All subsequent "Try it out" calls will include the `Authorization: Bearer` header automatically
+
+### All live endpoints at a glance
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | None | Liveness probe |
+| `GET` | `/docs` | None | Swagger UI |
+| `GET` | `/redoc` | None | ReDoc |
+| `GET` | `/api/customers` | JWT | List reseller's customers |
+| `POST` | `/api/customers` | JWT | Create customer + Retell agent |
+| `PUT` | `/api/customers/{id}/config` | JWT | Update agent config live |
+| `POST` | `/api/customers/{id}/web-call` | JWT | Create WebRTC browser call token |
+| `GET` | `/api/calls` | JWT | List call logs with transcripts |
+| `POST` | `/webhook/retell` | Retell signature | Retell AI webhook (not for direct use) |
 
 ---
 
@@ -29,10 +110,10 @@ Set these in Railway → Service → Variables (or Render → Environment).
 | `RETELL_API_KEY` | `key_xxx...` | Retell dashboard → API Keys |
 | `OPENROUTER_API_KEY` | `sk-or-v1-xxx...` | OpenRouter dashboard |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` | Supabase → Settings → API |
-| `SUPABASE_SERVICE_KEY` | `eyJhbG...` | Supabase → Settings → API → service_role key |
+| `SUPABASE_SERVICE_KEY` | `eyJhbG...` | Supabase → Settings → API → service_role key (set in Railway only — never commit) |
 | `SUPABASE_JWT_SECRET` | `xxxxxxxx-...` | Supabase → Settings → API → JWT Secret |
 | `REDIS_URL` | `redis://default:pwd@host:6379` | See Section 4 |
-| `WEBHOOK_BASE_URL` | `https://<service>.up.railway.app` | No trailing slash |
+| `WEBHOOK_BASE_URL` | `https://voice-agent-platform-production-86a4.up.railway.app` | No trailing slash |
 
 ### VAD / Barge-in Tuning (override without code deploy)
 
@@ -92,7 +173,7 @@ Deploy the FastAPI container to **US East** to minimise the round-trip on every 
 
 ### What happens if Redis is unreachable at startup
 
-`app/main.py` (`lifespan`, line 67–73) runs a `PING` on startup:
+`app/main.py` (lifespan) runs a `PING` on startup:
 
 ```
 INFO  Redis connection verified at redis://...
@@ -155,19 +236,24 @@ respx==0.21.1                  ← httpx transport-level mock for Retell API tes
 
 ## 6. Worker Configuration
 
-### Railway `railway.json` (current)
+### Current `railway.json`
 
 ```json
 {
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": { "builder": "NIXPACKS" },
   "deploy": {
-    "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
+    "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT --log-level info --log-config log_config.json",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
 }
 ```
 
-This starts a **single uvicorn process** — safe for initial deployment.
+- `--log-level info` — prevents Railway's log collector from marking startup messages as errors
+- `--log-config log_config.json` — routes all Uvicorn loggers (`uvicorn`, `uvicorn.error`, `uvicorn.access`) to `stdout` so Railway sees correct severity levels
+
+This starts a **single uvicorn process** — correct for initial deployment.
 
 ### Scaling to multiple workers
 
@@ -176,43 +262,86 @@ Redis-backed (not in-process memory), all workers share the same silence-counter
 state correctly:
 
 ```json
-{
-  "deploy": {
-    "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 4",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
-  }
-}
+"startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 4 --log-level info --log-config log_config.json"
 ```
 
-> **Rule of thumb:** set `--workers` to `2 × CPU_cores + 1`.
-> Railway Starter plan = 1 vCPU → `--workers 3`.
-> Railway Pro plan = 2 vCPU → `--workers 5`.
-
-Alternatively, deploy multiple Railway replicas with `--workers 1` per replica —
-Railway load-balances across them and Redis keeps state consistent.
+> **Rule of thumb:** `--workers = 2 × CPU_cores + 1`
+> Railway Starter plan = 1 vCPU → `--workers 3`
+> Railway Pro plan = 2 vCPU → `--workers 5`
 
 ---
 
 ## 7. Supabase — Schema Requirement
 
-The fused join in `webhook.py` (`_fetch_agent_config`) requires:
+### Required tables and columns
 
-1. A table `agent_configs` with a `customer_id` column that is a **foreign key**
-   to `customers.id`.
-2. A column `retell_agent_id` on the `customers` table.
+**`customers` table**
 
-The join selector `customers!customer_id(id, reseller_id)` explicitly names the FK
-column. If your FK column is named differently, update line 77 of `webhook.py`:
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` (PK) | Auto-generated |
+| `reseller_id` | `uuid` | FK to auth users |
+| `name` | `text` | |
+| `billing_email` | `text` | |
+| `phone_number` | `text` | nullable |
+| `plan` | `text` | default `'starter'` |
+| `status` | `text` | default `'active'` |
+| `retell_agent_id` | `text` | nullable — set after Retell agent creation |
+| `created_at` | `timestamptz` | auto |
+
+**`agent_configs` table**
+
+| Column | Type | Default | Notes |
+|---|---|---|---|
+| `id` | `uuid` (PK) | auto | |
+| `customer_id` | `uuid` (FK → customers.id) | | **The FK used by the PostgREST join** |
+| `system_prompt` | `text` | null | |
+| `voice_id` | `text` | `'11labs-Adrian'` | |
+| `language` | `text` | `'en-US'` | |
+| `llm_model` | `text` | `'openai/gpt-4o-mini'` | |
+| `recording_enabled` | `bool` | `false` | |
+| `business_hours` | `jsonb` | null | |
+| `escalation_phone` | `text` | null | |
+| `calendar_webhook_url` | `text` | null | |
+| `crm_webhook_url` | `text` | null | |
+| `faq_knowledge_base` | `text` | null | |
+| `prosody_style` | `text` | `'warm-conversational'` | **Track 1 — add this column** |
+| `silence_timeout_seconds` | `int` | `10` | **Track 4 — add this column** |
+| `max_silence_prompts` | `int` | `2` | **Track 4 — add this column** |
+
+The three columns marked **Track 1 / Track 4** were added in the latest backend release.
+Run this migration in the Supabase SQL editor if the columns don't exist yet:
+
+```sql
+ALTER TABLE agent_configs
+  ADD COLUMN IF NOT EXISTS prosody_style          TEXT NOT NULL DEFAULT 'warm-conversational',
+  ADD COLUMN IF NOT EXISTS silence_timeout_seconds INT  NOT NULL DEFAULT 10,
+  ADD COLUMN IF NOT EXISTS max_silence_prompts     INT  NOT NULL DEFAULT 2;
+```
+
+**`calls` table**
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` (PK) | |
+| `customer_id` | `uuid` (FK → customers.id) | |
+| `retell_call_id` | `text` | unique — used for upsert conflict target |
+| `caller_number` | `text` | nullable |
+| `duration_seconds` | `int` | nullable |
+| `outcome` | `text` | `completed \| transferred \| dropped \| voicemail \| no_answer` |
+| `transcript` | `jsonb` | array of `{role, content}` turns |
+| `started_at` | `timestamptz` | |
+| `ended_at` | `timestamptz` | |
+
+### PostgREST join note
+
+The webhook uses `customers!customer_id(id, reseller_id)` — the `!customer_id` is the explicit FK hint. If your FK column name differs, update `webhook.py:82`:
 
 ```python
-# Change `customer_id` to your actual FK column name
 .select("*, customers!<your_fk_column>(id, reseller_id)")
 ```
 
-PostgREST requires Row Level Security (RLS) to be compatible with the service role
-key. Since this platform uses `SUPABASE_SERVICE_KEY` (service role), RLS policies
-are bypassed — this is intentional for a backend-only service.
+RLS is bypassed for all operations because the backend uses `SUPABASE_SERVICE_KEY` (service role). This is intentional — the backend enforces access control through JWT validation in `auth.py`.
 
 ---
 
@@ -221,41 +350,55 @@ are bypassed — this is intentional for a backend-only service.
 ### Pre-deploy
 
 - [ ] Rotated all credentials that were in the old `.env.example`
-- [ ] `.env` is in `.gitignore`; `git status` shows no `.env` file tracked
-- [ ] `WEBHOOK_BASE_URL` is set to the deployed service's public URL
-- [ ] Redis service created in Railway (or external Redis URL configured)
+- [ ] `.env` is in `.gitignore` — `git status` shows no `.env` file tracked
+- [ ] `WEBHOOK_BASE_URL=https://voice-agent-platform-production-86a4.up.railway.app` set in Railway Variables
+- [ ] Redis service created in Railway and `REDIS_URL` auto-injected
 - [ ] Railway region set to **US East**
-- [ ] `DEV_MODE=false` in production variables
+- [ ] `DEV_MODE=false` in Railway Variables
+- [ ] Supabase `agent_configs` table has `prosody_style`, `silence_timeout_seconds`, `max_silence_prompts` columns (run migration above)
 
 ### Post-deploy smoke tests
 
 ```bash
 # 1. Health check
-curl https://<your-service>.up.railway.app/health
+curl https://voice-agent-platform-production-86a4.up.railway.app/health
 # Expected: {"status":"ok"}
 
-# 2. Check startup logs for Redis confirmation
-# Railway → Service → Deployments → latest → Logs
-# Expected: "INFO Redis connection verified at redis://..."
+# 2. Auth guard (no token → 401)
+curl https://voice-agent-platform-production-86a4.up.railway.app/api/customers
+# Expected: {"detail":"Not authenticated"}
 
-# 3. Verify webhook URL is reachable (Retell needs to POST to it)
-curl -X POST https://<your-service>.up.railway.app/webhook/retell \
+# 3. Retell webhook acknowledgement
+curl -X POST https://voice-agent-platform-production-86a4.up.railway.app/webhook/retell \
   -H "Content-Type: application/json" \
   -d '{"event":"call_started","call":{"agent_id":"test","call_id":"test"}}'
 # Expected: {"status":"ok"}
+
+# 4. Interactive docs reachable
+open https://voice-agent-platform-production-86a4.up.railway.app/docs
 ```
+
+### Verify startup logs in Railway
+
+Railway dashboard → your service → **Deployments** → latest → **Logs**
+
+Expected on a clean start:
+```
+INFO  Voice Agent Platform starting up…
+INFO  HTTP client pool initialised.
+INFO  Redis connection verified at redis://...
+INFO  Application startup complete.
+INFO  Uvicorn running on http://0.0.0.0:8080
+```
+
+All lines should show `severity: info` — not `severity: error`.
 
 ### Running the test suite before deploy
 
 ```bash
-# Install test deps (never in production image)
 pip install -r requirements-dev.txt
-
-# Run all 105 tests
-pytest tests/ -v
-
-# With coverage report
-pytest tests/ --cov=app --cov-report=term-missing
+pytest tests/ -v                                    # 105 tests
+pytest tests/ --cov=app --cov-report=term-missing   # with coverage
 ```
 
 ---
@@ -266,6 +409,8 @@ pytest tests/ --cov=app --cov-report=term-missing
 |---|---|
 | `WARNING Redis ping failed` in startup logs | Redis is down — silence counters won't persist across workers |
 | `502 Bad Gateway` on `/webhook/retell` | OpenRouter unreachable or API key invalid |
-| `404` on `/webhook/retell` with a valid agent_id | `customers!customer_id` FK join returning no rows — check schema |
+| `404` on `/webhook/retell` with a valid agent_id | `customers!customer_id` FK join returning no rows — check schema or run the migration in Section 7 |
+| `severity: error` on INFO log lines | Logs still routing to stderr — check `log_config.json` is present and `--log-config` flag is in `railway.json` |
 | Flat response latency >2 s in Retell dashboard | Check Railway region (should be US East) and OpenRouter model |
-| `PGRST201` error in logs | Multiple FK paths between `agent_configs` and `customers` — disambiguate FK hint in `webhook.py:77` |
+| `PGRST201` error in logs | Multiple FK paths between `agent_configs` and `customers` — disambiguate FK hint in `webhook.py:82` |
+| `prosody_style` / `silence_timeout_seconds` reverting to defaults | `agent_configs` table missing the three new columns — run the SQL migration in Section 7 |
