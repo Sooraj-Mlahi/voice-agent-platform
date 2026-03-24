@@ -37,7 +37,7 @@ class AgentConfig(BaseModel):
     system_prompt: str | None = Field(default=None)
     voice_id: str | None = Field(default="11labs-Adrian")
     language: str = Field(default="en-US")
-    llm_model: str = Field(default="openai/gpt-4o-mini")  # faster default; override to gpt-4o for complex agents
+    llm_model: str = Field(default="gpt-4o-mini")  # Retell-native name; also accepts openai/gpt-4o-mini (auto-translated)
     business_hours: dict[str, Any] | None = Field(default=None)
     escalation_phone: str | None = Field(default=None)
     calendar_webhook_url: str | None = Field(default=None)

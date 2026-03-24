@@ -34,6 +34,42 @@ logger = logging.getLogger(__name__)
 
 RETELL_BASE_URL = "https://api.retellai.com"
 
+# ---------------------------------------------------------------------------
+# Model name translation — OpenRouter format → Retell native format
+# ---------------------------------------------------------------------------
+# AgentConfig stores OpenRouter-style names (e.g. "openai/gpt-4o-mini") so the
+# frontend and Supabase use a consistent namespace. Retell's /create-retell-llm
+# endpoint uses its own registry. This map translates at the service boundary.
+_OPENROUTER_TO_RETELL: dict[str, str] = {
+    # OpenAI
+    "openai/gpt-4o-mini":        "gpt-4o-mini",
+    "openai/gpt-4o":             "gpt-4o",
+    "openai/gpt-4.1":            "gpt-4.1",
+    "openai/gpt-4.1-mini":       "gpt-4.1-mini",
+    "openai/gpt-4.1-nano":       "gpt-4.1-nano",
+    # Anthropic
+    "anthropic/claude-3-haiku":          "claude-4.5-haiku",
+    "anthropic/claude-3-5-haiku":        "claude-4.5-haiku",
+    "anthropic/claude-3-sonnet":         "claude-4.5-sonnet",
+    "anthropic/claude-3-5-sonnet":       "claude-4.5-sonnet",
+    "anthropic/claude-3-5-sonnet-20241022": "claude-4.5-sonnet",
+    "anthropic/claude-sonnet-4-5":       "claude-4.5-sonnet",
+    "anthropic/claude-sonnet-4-6":       "claude-4.6-sonnet",
+    # Google
+    "google/gemini-flash-1.5":           "gemini-2.0-flash",
+    "google/gemini-2.0-flash":           "gemini-2.0-flash",
+    "google/gemini-2.5-flash":           "gemini-2.5-flash",
+}
+
+
+def _retell_model(openrouter_model: str) -> str:
+    """Translate an OpenRouter model name to a Retell-native model name.
+
+    Falls back to the input unchanged so that callers already using Retell
+    names (e.g. "gpt-4o-mini") continue to work without modification.
+    """
+    return _OPENROUTER_TO_RETELL.get(openrouter_model, openrouter_model)
+
 
 def _headers() -> dict[str, str]:
     return {
@@ -55,7 +91,7 @@ def _client(http_client: httpx.AsyncClient | None) -> httpx.AsyncClient | None:
 # ---------------------------------------------------------------------------
 async def _create_retell_llm(
     system_prompt: str,
-    model: str = "openai/gpt-4o-mini",
+    model: str = "gpt-4o-mini",
     temperature: float = 0.7,
     http_client: httpx.AsyncClient | None = None,
 ) -> str:
@@ -66,7 +102,7 @@ async def _create_retell_llm(
     """
     payload = {
         "general_prompt": system_prompt,
-        "model": model,
+        "model": _retell_model(model),
         "temperature": temperature,
     }
 
@@ -97,7 +133,7 @@ async def create_retell_agent(
     system_prompt: str,
     voice_id: str = "11labs-Adrian",
     language: str = "en-US",
-    model: str = "openai/gpt-4o-mini",
+    model: str = "gpt-4o-mini",
     temperature: float = 0.7,
     prosody_style: str = "warm-conversational",
     silence_timeout_seconds: int = 10,
