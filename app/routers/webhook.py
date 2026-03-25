@@ -233,8 +233,24 @@ async def _log_call_to_supabase(
         "tokens_used": tokens_used,
         "prosody_style_used": prosody_style,
     }
-    db.table("calls").upsert(record, on_conflict="retell_call_id").execute()
-    logger.info("Logged call %s for customer %s (cost=$%.4f)", call_id, customer_id, cost_usd or 0)
+
+    # Explicit check → insert/update instead of upsert(on_conflict=...).
+    # upsert requires a UNIQUE constraint on retell_call_id to exist in Supabase.
+    # Without it Postgres raises 42P10 and nothing is saved. This pattern works
+    # regardless of whether the constraint is declared.
+    existing = (
+        db.table("calls")
+        .select("id")
+        .eq("retell_call_id", call_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        db.table("calls").update(record).eq("retell_call_id", call_id).execute()
+        logger.info("Updated call %s for customer %s (cost=$%.4f)", call_id, customer_id, cost_usd or 0)
+    else:
+        db.table("calls").insert(record).execute()
+        logger.info("Inserted call %s for customer %s (cost=$%.4f)", call_id, customer_id, cost_usd or 0)
 
 
 # ---------------------------------------------------------------------------

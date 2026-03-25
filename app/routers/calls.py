@@ -23,21 +23,31 @@ async def list_calls(
     """Return all call logs belonging to the authenticated reseller."""
     try:
         db = get_supabase()
-        # Since the `calls` table doesn't have reseller_id, we join with `customers`
-        # and filter where customers.reseller_id == the logged in reseller
+
+        # Step 1 — get customer IDs that belong to this reseller.
+        # Two-query approach avoids dependency on a PostgREST FK join.
+        # The FK join (customers!inner) requires a formal FK constraint declared
+        # in Supabase; without it PostgREST silently returns nothing or 500s.
+        customers_result = (
+            db.table("customers")
+            .select("id")
+            .eq("reseller_id", reseller_id)
+            .execute()
+        )
+        customer_ids = [c["id"] for c in (customers_result.data or [])]
+
+        if not customer_ids:
+            return []
+
+        # Step 2 — fetch calls for those customers, newest first.
         result = (
             db.table("calls")
-            .select("*, customers!inner(reseller_id)")
-            .eq("customers.reseller_id", reseller_id)
+            .select("*")
+            .in_("customer_id", customer_ids)
             .order("started_at", desc=True)
             .execute()
         )
-        # Remove the nested `customers` dict from the output for clean API responses
-        calls = result.data or []
-        for call in calls:
-            call.pop("customers", None)
-            
-        return calls
+        return result.data or []
     except Exception as exc:
         logger.exception("Failed to fetch calls for reseller %s: %s", reseller_id, exc)
         raise HTTPException(
