@@ -319,29 +319,57 @@ ALTER TABLE agent_configs
   ADD COLUMN IF NOT EXISTS max_silence_prompts     INT  NOT NULL DEFAULT 2;
 ```
 
+**`agent_configs` table — additional column (run if missing)**
+
+```sql
+-- Migration 2: STT custom vocabulary support
+ALTER TABLE agent_configs
+  ADD COLUMN IF NOT EXISTS custom_vocabulary JSONB DEFAULT '[]'::jsonb;
+```
+
 **`calls` table**
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` (PK) | |
 | `customer_id` | `uuid` (FK → customers.id) | |
-| `retell_call_id` | `text` | unique — used for upsert conflict target |
+| `retell_call_id` | `text` | **UNIQUE** — required for upsert conflict target |
 | `caller_number` | `text` | nullable |
 | `duration_seconds` | `int` | nullable |
 | `outcome` | `text` | `completed \| transferred \| dropped \| voicemail \| no_answer` |
-| `transcript` | `jsonb` | array of `{role, content}` turns |
+| `transcript` | `text` | JSON-serialised array of `{role, content}` turns |
 | `started_at` | `timestamptz` | |
 | `ended_at` | `timestamptz` | |
+| `cost_usd` | `numeric(10,4)` | nullable — from Retell `combined_cost` ÷ 100 |
+| `latency_p50_ms` | `int` | nullable — from Retell `e2e_latency.p50` |
+| `tokens_used` | `int` | nullable — from Retell `call_cost.llm_tokens_used` |
+| `prosody_style_used` | `text` | nullable — tone preset active during call |
+
+> **Migration required** — run this in Supabase SQL Editor if the `calls` table is missing the analytics columns or the UNIQUE constraint:
+
+```sql
+-- Migration 3: calls table — analytics columns + UNIQUE constraint
+ALTER TABLE calls
+  ADD COLUMN IF NOT EXISTS cost_usd           NUMERIC(10,4),
+  ADD COLUMN IF NOT EXISTS latency_p50_ms     INT,
+  ADD COLUMN IF NOT EXISTS tokens_used        INT,
+  ADD COLUMN IF NOT EXISTS prosody_style_used TEXT;
+
+-- Required for ON CONFLICT upsert in _log_call_to_supabase
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'calls_retell_call_id_key'
+    AND conrelid = 'calls'::regclass
+  ) THEN
+    ALTER TABLE calls ADD CONSTRAINT calls_retell_call_id_key UNIQUE (retell_call_id);
+  END IF;
+END $$;
+```
 
 ### PostgREST join note
 
-The webhook uses `customers!customer_id(id, reseller_id)` — the `!customer_id` is the explicit FK hint. If your FK column name differs, update `webhook.py:82`:
-
-```python
-.select("*, customers!<your_fk_column>(id, reseller_id)")
-```
-
-RLS is bypassed for all operations because the backend uses `SUPABASE_SERVICE_KEY` (service role). This is intentional — the backend enforces access control through JWT validation in `auth.py`.
+The `GET /api/calls` endpoint uses `customers!inner(reseller_id)` — the `!inner` makes it an INNER JOIN, which correctly filters base rows by reseller. RLS is bypassed for all operations because the backend uses `SUPABASE_SERVICE_KEY` (service role). This is intentional — the backend enforces access control through JWT validation in `auth.py`.
 
 ---
 
@@ -355,7 +383,9 @@ RLS is bypassed for all operations because the backend uses `SUPABASE_SERVICE_KE
 - [ ] Redis service created in Railway and `REDIS_URL` auto-injected
 - [ ] Railway region set to **US East**
 - [ ] `DEV_MODE=false` in Railway Variables
-- [ ] Supabase `agent_configs` table has `prosody_style`, `silence_timeout_seconds`, `max_silence_prompts` columns (run migration above)
+- [ ] Supabase `agent_configs` table has `prosody_style`, `silence_timeout_seconds`, `max_silence_prompts` columns (Migration 1 above)
+- [ ] Supabase `agent_configs` table has `custom_vocabulary` column (Migration 2 above)
+- [ ] Supabase `calls` table has `cost_usd`, `latency_p50_ms`, `tokens_used`, `prosody_style_used` columns + UNIQUE constraint on `retell_call_id` (Migration 3 above)
 
 ### Post-deploy smoke tests
 
@@ -409,7 +439,9 @@ pytest tests/ --cov=app --cov-report=term-missing   # with coverage
 |---|---|
 | `WARNING Redis ping failed` in startup logs | Redis is down — silence counters won't persist across workers |
 | `502 Bad Gateway` on `/webhook/retell` | OpenRouter unreachable or API key invalid |
-| `404` on `/webhook/retell` with a valid agent_id | `customers!customer_id` FK join returning no rows — check schema or run the migration in Section 7 |
+| `404` on `/webhook/retell` with a valid agent_id | No `customers` row with matching `retell_agent_id` — check schema or run the Webhook Awakening script |
+| `Failed to log call` in Railway logs | `calls` table missing analytics columns — run Migration 3 in Section 7 |
+| `Failed to insert agent config` in Railway logs | `agent_configs` table missing `custom_vocabulary` column — run Migration 2 in Section 7 |
 | `severity: error` on INFO log lines | Logs still routing to stderr — check `log_config.json` is present and `--log-config` flag is in `railway.json` |
 | Flat response latency >2 s in Retell dashboard | Check Railway region (should be US East) and OpenRouter model |
 | `PGRST201` error in logs | Multiple FK paths between `agent_configs` and `customers` — disambiguate FK hint in `webhook.py:82` |
