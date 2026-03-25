@@ -203,21 +203,43 @@ async def _log_call_to_supabase(
         if ended_at_ms else None
     )
 
-    # Cost: Retell provides combined_cost in USD cents on call_analyzed
-    cost_raw = call.get("combined_cost")
-    cost_usd = (cost_raw / 100.0) if cost_raw is not None else None
+    # Log the analytics fields Retell actually sent so we can verify field names.
+    call_cost = call.get("call_cost") or {}
+    e2e = call.get("e2e_latency") or {}
+    logger.info(
+        "call_analyzed analytics for %s — call_cost keys=%s  e2e_latency keys=%s  "
+        "top-level combined_cost=%s",
+        call_id,
+        list(call_cost.keys()) if isinstance(call_cost, dict) else call_cost,
+        list(e2e.keys()) if isinstance(e2e, dict) else e2e,
+        call.get("combined_cost"),
+    )
 
-    # Latency: Retell provides e2e_latency.p50 in ms on call_analyzed
-    latency_p50_ms = None
-    e2e = call.get("e2e_latency")
+    # Cost: Retell v2 puts combined_cost inside call_cost (already USD, not cents).
+    # Fall back to top-level combined_cost / 100 for older API versions.
+    cost_usd: float | None = None
+    if isinstance(call_cost, dict):
+        if call_cost.get("combined_cost") is not None:
+            cost_usd = float(call_cost["combined_cost"])          # v2: already USD
+        elif call.get("combined_cost") is not None:
+            cost_usd = float(call["combined_cost"]) / 100.0       # v1: cents → USD
+
+    # Latency: e2e_latency.p50 in ms — field name is consistent across v1/v2
+    latency_p50_ms: int | None = None
     if isinstance(e2e, dict):
         latency_p50_ms = e2e.get("p50")
 
-    # Tokens: call_cost breakdown contains llm_tokens_used
-    tokens_used = None
-    call_cost = call.get("call_cost")
+    # Tokens: call_cost.total_tokens (v2) or llm_tokens_used (v1)
+    tokens_used: int | None = None
     if isinstance(call_cost, dict):
-        tokens_used = call_cost.get("llm_tokens_used") or call_cost.get("total_tokens")
+        tokens_used = (
+            call_cost.get("total_tokens")
+            or call_cost.get("llm_tokens_used")
+            or (
+                (call_cost.get("total_input_tokens") or 0)
+                + (call_cost.get("total_output_tokens") or 0)
+            ) or None
+        )
 
     record = {
         "customer_id": customer_id,

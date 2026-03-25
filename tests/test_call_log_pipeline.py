@@ -39,7 +39,7 @@ def _make_call(
     agent_id: str = "agent_abc",
     transcript: list | None = None,
     duration_ms: int = 60_000,
-    combined_cost: int = 500,        # USD cents
+    combined_cost: int | None = 500,  # top-level cents (v1) or None
     e2e_latency: dict | None = None,
     call_cost: dict | None = None,
     disconnection_reason: str = "user_hangup",
@@ -211,9 +211,44 @@ async def test_log_call_extracts_latency_p50():
 
 
 @pytest.mark.asyncio
+async def test_log_call_extracts_cost_usd_from_call_cost_v2():
+    """Retell v2: combined_cost is inside call_cost dict, already in USD."""
+    # Remove top-level combined_cost; put it inside call_cost
+    call = _make_call(combined_cost=None, call_cost={"combined_cost": 0.05, "total_tokens": 300})
+    captured_record: dict = {}
+
+    insert_mock = MagicMock()
+    insert_mock.execute.return_value = MagicMock(data=[])
+
+    select_mock = MagicMock()
+    select_mock.eq.return_value = select_mock
+    select_mock.limit.return_value = select_mock
+    select_mock.execute.return_value = MagicMock(data=[])
+
+    calls_table = MagicMock()
+    calls_table.select.return_value = select_mock
+
+    def capture_insert(record):
+        captured_record.update(record)
+        return insert_mock
+
+    calls_table.insert.side_effect = capture_insert
+
+    db = MagicMock()
+    db.table.return_value = calls_table
+
+    with patch("app.routers.webhook.get_supabase", return_value=db):
+        await _log_call_to_supabase(call, "cust-id", "warm-conversational")
+
+    assert captured_record.get("cost_usd") == pytest.approx(0.05), (
+        f"v2 cost_usd expected 0.05, got {captured_record.get('cost_usd')}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_log_call_extracts_cost_usd():
-    """cost_usd = combined_cost / 100.0 (Retell gives cents)."""
-    call = _make_call(combined_cost=1234)   # 1234 cents = $12.34
+    """Retell v1 fallback: top-level combined_cost in cents → divide by 100."""
+    call = _make_call(combined_cost=1234, call_cost={})   # 1234 cents = $12.34
     captured_record: dict = {}
 
     insert_mock = MagicMock()
