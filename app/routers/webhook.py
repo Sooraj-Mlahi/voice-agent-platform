@@ -60,27 +60,32 @@ def _is_on_topic(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Fused Supabase query (Track 3 — replaces two sequential queries)
+# Agent config lookup — customer-first query
 # ---------------------------------------------------------------------------
 async def _fetch_agent_config(agent_id: str) -> dict[str, Any]:
     """
-    Single joined query replaces the previous two-step lookup:
-      old: customers → agent_configs (two round-trips)
-      new: agent_configs JOIN customers (one round-trip)
+    Look up the agent config for a given Retell agent_id.
+
+    Query direction: customers (base, filter by retell_agent_id) → agent_configs (embed).
+
+    Why customer-first fixes the PGRST116 "multiple rows" crash:
+      OLD: agent_configs as base → PostgREST embedded filter on customers.retell_agent_id
+           does NOT filter base rows — all agent_configs rows are returned → .single()
+           receives N rows and throws PGRST116.
+      NEW: customers as base → .eq("retell_agent_id", agent_id) is a direct base-table
+           filter → exactly one customers row is returned (retell_agent_id is unique) →
+           .single() is guaranteed to see 0 or 1 rows, never N.
 
     Returns a dict with keys: customer_id, reseller_id, agent_config (dict).
-
-    Join uses the explicit FK hint `customers!customer_id` so PostgREST never
-    has to guess which FK to use if the schema adds a second customers reference
-    later (e.g. a billing_customer_id). Without the hint, PostgREST would raise
-    PGRST201 ("could not embed") at runtime with no prior warning.
+    If no agent_configs row exists for the customer, agent_config defaults to {}
+    so the call can still be logged without crashing.
     """
     db = get_supabase()
 
     result = (
-        db.table("agent_configs")
-        .select("*, customers!customer_id(id, reseller_id)")
-        .eq("customers.retell_agent_id", agent_id)
+        db.table("customers")
+        .select("id, reseller_id, agent_configs(*)")
+        .eq("retell_agent_id", agent_id)
         .single()
         .execute()
     )
@@ -88,14 +93,26 @@ async def _fetch_agent_config(agent_id: str) -> dict[str, Any]:
     if not result.data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No agent_config found for agent_id={agent_id}",
+            detail=f"No customer found for retell_agent_id={agent_id}",
         )
 
-    customer_row = result.data.pop("customers", {})
+    customer = result.data
+    # agent_configs is returned as a list by PostgREST (child embed).
+    # customer_id UNIQUE ensures at most one element — take it or use defaults.
+    configs_list: list[dict[str, Any]] = customer.get("agent_configs") or []
+    agent_config: dict[str, Any] = configs_list[0] if configs_list else {}
+
+    if not agent_config:
+        logger.warning(
+            "No agent_configs row for customer_id=%s (agent_id=%s) — "
+            "using defaults. Call will be logged but may lack prosody/model settings.",
+            customer["id"], agent_id,
+        )
+
     return {
-        "customer_id": customer_row.get("id", ""),
-        "reseller_id": customer_row.get("reseller_id", ""),
-        "agent_config": result.data,
+        "customer_id": customer["id"],
+        "reseller_id": customer["reseller_id"],
+        "agent_config": agent_config,
     }
 
 
