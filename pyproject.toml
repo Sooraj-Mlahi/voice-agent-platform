@@ -4,7 +4,7 @@
 asyncio_mode = "auto"
 
 testpaths  = ["tests"]
-addopts    = "-v --tb=short"
+addopts    = "-v --tb=short -p no:langsmith"
 
 # Suppress noisy third-party loggers during test runs.
 log_cli       = false
