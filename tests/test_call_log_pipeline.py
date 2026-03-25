@@ -212,9 +212,9 @@ async def test_log_call_extracts_latency_p50():
 
 @pytest.mark.asyncio
 async def test_log_call_extracts_cost_usd_from_call_cost_v2():
-    """Retell v2: combined_cost is inside call_cost dict, already in USD."""
-    # Remove top-level combined_cost; put it inside call_cost
-    call = _make_call(combined_cost=None, call_cost={"combined_cost": 0.05, "total_tokens": 300})
+    """Retell v2: combined_cost is inside call_cost dict, in cents → divide by 100."""
+    # Remove top-level combined_cost; put it inside call_cost (5 cents = $0.05)
+    call = _make_call(combined_cost=None, call_cost={"combined_cost": 5, "total_tokens": 300})
     captured_record: dict = {}
 
     insert_mock = MagicMock()
@@ -241,7 +241,7 @@ async def test_log_call_extracts_cost_usd_from_call_cost_v2():
         await _log_call_to_supabase(call, "cust-id", "warm-conversational")
 
     assert captured_record.get("cost_usd") == pytest.approx(0.05), (
-        f"v2 cost_usd expected 0.05, got {captured_record.get('cost_usd')}"
+        f"v2 cost_usd: expected 5 cents → $0.05, got {captured_record.get('cost_usd')}"
     )
 
 

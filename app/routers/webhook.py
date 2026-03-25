@@ -203,43 +203,59 @@ async def _log_call_to_supabase(
         if ended_at_ms else None
     )
 
-    # Log the analytics fields Retell actually sent so we can verify field names.
+    # ── Raw payload inspection — logged on EVERY call_analyzed ─────────────
+    # Check Railway logs for these lines to verify what Retell actually sends.
     call_cost = call.get("call_cost") or {}
-    e2e = call.get("e2e_latency") or {}
+    e2e       = call.get("e2e_latency") or {}
     logger.info(
-        "call_analyzed analytics for %s — call_cost keys=%s  e2e_latency keys=%s  "
-        "top-level combined_cost=%s",
+        "RETELL PAYLOAD [%s]  call_cost=%r  e2e_latency=%r  "
+        "top_combined_cost=%r  duration_ms=%r",
         call_id,
-        list(call_cost.keys()) if isinstance(call_cost, dict) else call_cost,
-        list(e2e.keys()) if isinstance(e2e, dict) else e2e,
+        dict(call_cost) if isinstance(call_cost, dict) else call_cost,
+        dict(e2e)       if isinstance(e2e, dict)       else e2e,
         call.get("combined_cost"),
+        call.get("duration_ms"),
     )
 
-    # Cost: Retell v2 puts combined_cost inside call_cost (already USD, not cents).
-    # Fall back to top-level combined_cost / 100 for older API versions.
+    # ── Cost ─────────────────────────────────────────────────────────────────
+    # Retell sends combined_cost in USD CENTS (integer), not USD.
+    # e.g. a $0.60 call → combined_cost = 60 → divide by 100 → $0.60.
+    # The field can appear at the top level OR inside call_cost depending on
+    # the Retell API version — check both, always divide by 100.
     cost_usd: float | None = None
-    if isinstance(call_cost, dict):
-        if call_cost.get("combined_cost") is not None:
-            cost_usd = float(call_cost["combined_cost"])          # v2: already USD
-        elif call.get("combined_cost") is not None:
-            cost_usd = float(call["combined_cost"]) / 100.0       # v1: cents → USD
+    raw_cost = call.get("combined_cost")
+    if raw_cost is None and isinstance(call_cost, dict):
+        raw_cost = call_cost.get("combined_cost")
+    if raw_cost is not None:
+        cost_usd = float(raw_cost) / 100.0      # cents → USD
 
-    # Latency: e2e_latency.p50 in ms — field name is consistent across v1/v2
+    # ── Latency ──────────────────────────────────────────────────────────────
+    # e2e_latency is a dict with percentile keys in MILLISECONDS.
+    # p50 = median response latency. Stored as int ms, displayed as ms on frontend.
     latency_p50_ms: int | None = None
-    if isinstance(e2e, dict):
-        latency_p50_ms = e2e.get("p50")
+    if isinstance(e2e, dict) and e2e:
+        raw_p50 = e2e.get("p50") or e2e.get("p_50") or e2e.get("median")
+        if raw_p50 is not None:
+            latency_p50_ms = int(raw_p50)   # ensure int, already in ms
 
-    # Tokens: call_cost.total_tokens (v2) or llm_tokens_used (v1)
+    # ── Tokens ───────────────────────────────────────────────────────────────
     tokens_used: int | None = None
     if isinstance(call_cost, dict):
-        tokens_used = (
+        raw_tokens = (
             call_cost.get("total_tokens")
             or call_cost.get("llm_tokens_used")
-            or (
-                (call_cost.get("total_input_tokens") or 0)
-                + (call_cost.get("total_output_tokens") or 0)
-            ) or None
         )
+        if raw_tokens is None:
+            inp = call_cost.get("total_input_tokens") or 0
+            out = call_cost.get("total_output_tokens") or 0
+            raw_tokens = (inp + out) or None
+        if raw_tokens is not None:
+            tokens_used = int(raw_tokens)
+
+    logger.info(
+        "ANALYTICS EXTRACTED [%s]  cost_usd=%s  latency_p50_ms=%s  tokens=%s",
+        call_id, cost_usd, latency_p50_ms, tokens_used,
+    )
 
     record = {
         "customer_id": customer_id,
