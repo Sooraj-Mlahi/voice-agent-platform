@@ -18,6 +18,7 @@ from app.services import retell
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Customers"])
+public_router = APIRouter(prefix="/public", tags=["Public"])
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,10 @@ async def create_customer(
                 system_prompt=body.agent_config.system_prompt or "",
                 voice_id=body.agent_config.voice_id or "11labs-Adrian",
                 language=body.agent_config.language,
+                model=body.agent_config.llm_model,
+                prosody_style=body.agent_config.prosody_style,
+                silence_timeout_seconds=body.agent_config.silence_timeout_seconds,
+                custom_vocabulary=body.agent_config.custom_vocabulary or None,
             )
             retell_agent_id = retell_response.get("agent_id", "")
         except Exception as exc:
@@ -105,6 +110,8 @@ async def create_customer(
         # Track 4 — Silence / State-bound flow
         "silence_timeout_seconds": body.agent_config.silence_timeout_seconds,
         "max_silence_prompts": body.agent_config.max_silence_prompts,
+        # STT — custom vocabulary
+        "custom_vocabulary": body.agent_config.custom_vocabulary,
     }
 
     try:
@@ -219,6 +226,8 @@ async def update_agent_config(
         # Track 4 — Silence / State-bound flow
         "silence_timeout_seconds": config.silence_timeout_seconds,
         "max_silence_prompts": config.max_silence_prompts,
+        # STT — custom vocabulary
+        "custom_vocabulary": config.custom_vocabulary,
     }
     
     # We remove None keys so we don't accidentally overwrite good data with nulls when patching
@@ -299,4 +308,74 @@ async def create_web_call_for_customer(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Retell Web Call creation failed: {exc}",
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Public (no auth) — Instant Agent Page endpoints
+# GET  /public/agent/:customer_id        → agent display name + voice_id
+# POST /public/agent/:customer_id/token  → Retell web-call access token
+# ---------------------------------------------------------------------------
+
+@public_router.get("/agent/{customer_id}")
+async def public_agent_info(customer_id: str) -> dict[str, Any]:
+    """
+    Returns minimal public-safe agent metadata for the Instant Agent Page.
+    No auth required — only non-sensitive fields are exposed.
+    """
+    db = get_supabase()
+    try:
+        result = (
+            db.table("customers")
+            .select("id, name, retell_agent_id")
+            .eq("id", customer_id)
+            .single()
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found") from exc
+
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    return {
+        "customer_id": result.data["id"],
+        "name": result.data["name"],
+        "has_agent": bool(result.data.get("retell_agent_id")),
+    }
+
+
+@public_router.post("/agent/{customer_id}/token")
+async def public_agent_token(customer_id: str) -> dict[str, Any]:
+    """
+    Creates a Retell WebRTC access token for the public Instant Agent Page.
+    No auth required — anyone with the customer_id can start a call.
+    Rate-limiting should be applied at the infrastructure level (Railway / Vercel).
+    """
+    db = get_supabase()
+    try:
+        result = (
+            db.table("customers")
+            .select("retell_agent_id")
+            .eq("id", customer_id)
+            .single()
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found") from exc
+
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    agent_id = result.data.get("retell_agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No agent configured")
+
+    try:
+        return await retell.create_web_call(agent_id)
+    except Exception as exc:
+        logger.exception("Public token creation failed for customer %s: %s", customer_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to create call token",
         ) from exc

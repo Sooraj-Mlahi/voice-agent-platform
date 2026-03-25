@@ -137,6 +137,7 @@ async def create_retell_agent(
     temperature: float = 0.7,
     prosody_style: str = "warm-conversational",
     silence_timeout_seconds: int = 10,
+    custom_vocabulary: list[str] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """
@@ -194,7 +195,17 @@ async def create_retell_agent(
         # Let our webhook manage the final hang-up — don't let Retell
         # auto-disconnect too early (10 minutes = generous ceiling).
         "end_call_after_silence_ms": 600_000,
+
+        # ── STT — Deepgram Nova-2 + custom vocabulary ─────────────────
+        # Nova-2 is Deepgram's highest-accuracy model and handles
+        # domain-specific terminology significantly better than the default.
+        "asr_model": "deepgram",
     }
+
+    # Custom vocabulary: boosts recognition of brand names, product terms,
+    # medical jargon, etc. Only included when caller supplies terms.
+    if custom_vocabulary:
+        payload["custom_vocabulary"] = custom_vocabulary
 
     if settings.webhook_base_url:
         payload["webhook_url"] = (

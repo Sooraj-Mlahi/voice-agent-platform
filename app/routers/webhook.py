@@ -129,11 +129,21 @@ def _has_user_content(messages: list[dict[str, str]]) -> bool:
 async def _log_call_to_supabase(
     call: dict[str, Any],
     customer_id: str,
+    prosody_style: str = "warm-conversational",
 ) -> None:
     """Insert / upsert a completed call record into the calls table."""
+    import json as _json
+
     db = get_supabase()
 
-    transcript = call.get("transcript", "")
+    # Retell sends transcript as a list of {role, content} dicts.
+    # Serialize to a JSON string so it fits a TEXT column without data loss.
+    raw_transcript = call.get("transcript", [])
+    if isinstance(raw_transcript, list):
+        transcript = _json.dumps(raw_transcript)
+    else:
+        transcript = str(raw_transcript)
+
     duration = call.get("duration_ms")
     duration_seconds = (duration // 1000) if duration else None
     call_id = call.get("call_id")
@@ -141,14 +151,16 @@ async def _log_call_to_supabase(
 
     outcome = "completed"
     disc_reason = call.get("disconnection_reason", "")
-    if "transfer" in disc_reason.lower():
-        outcome = "transferred"
-    elif "voicemail" in disc_reason.lower():
-        outcome = "voicemail"
-    elif "drop" in disc_reason.lower():
-        outcome = "dropped"
-    elif "no_answer" in disc_reason.lower() or "timeout" in disc_reason.lower():
-        outcome = "no_answer"
+    if disc_reason:
+        disc_lower = disc_reason.lower()
+        if "transfer" in disc_lower:
+            outcome = "transferred"
+        elif "voicemail" in disc_lower:
+            outcome = "voicemail"
+        elif "drop" in disc_lower:
+            outcome = "dropped"
+        elif "no_answer" in disc_lower or "timeout" in disc_lower:
+            outcome = "no_answer"
 
     started_at_ms = call.get("start_timestamp")
     ended_at_ms = call.get("end_timestamp")
@@ -161,6 +173,22 @@ async def _log_call_to_supabase(
         if ended_at_ms else None
     )
 
+    # Cost: Retell provides combined_cost in USD cents on call_analyzed
+    cost_raw = call.get("combined_cost")
+    cost_usd = (cost_raw / 100.0) if cost_raw is not None else None
+
+    # Latency: Retell provides e2e_latency.p50 in ms on call_analyzed
+    latency_p50_ms = None
+    e2e = call.get("e2e_latency")
+    if isinstance(e2e, dict):
+        latency_p50_ms = e2e.get("p50")
+
+    # Tokens: call_cost breakdown contains llm_tokens_used
+    tokens_used = None
+    call_cost = call.get("call_cost")
+    if isinstance(call_cost, dict):
+        tokens_used = call_cost.get("llm_tokens_used") or call_cost.get("total_tokens")
+
     record = {
         "customer_id": customer_id,
         "retell_call_id": call_id,
@@ -170,9 +198,13 @@ async def _log_call_to_supabase(
         "transcript": transcript,
         "started_at": started_at,
         "ended_at": ended_at,
+        "cost_usd": cost_usd,
+        "latency_p50_ms": latency_p50_ms,
+        "tokens_used": tokens_used,
+        "prosody_style_used": prosody_style,
     }
     db.table("calls").upsert(record, on_conflict="retell_call_id").execute()
-    logger.info("Logged call %s for customer %s", call_id, customer_id)
+    logger.info("Logged call %s for customer %s (cost=$%.4f)", call_id, customer_id, cost_usd or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -266,12 +298,24 @@ async def retell_webhook(
         return {"status": "ok"}
 
     # ------------------------------------------------------------------
-    # call_ended / call_analyzed — log transcript, clear state
+    # call_ended — Redis cleanup only; wait for call_analyzed for full data
     # ------------------------------------------------------------------
-    if event in ("call_ended", "call_analyzed"):
+    if event == "call_ended":
+        if conv_state and call_id:
+            try:
+                await conv_state.clear(call_id)
+            except Exception:
+                pass
+        return {"status": "ok"}
+
+    # ------------------------------------------------------------------
+    # call_analyzed — full transcript + cost + latency available, log now
+    # ------------------------------------------------------------------
+    if event == "call_analyzed":
         try:
             agent_data = await _fetch_agent_config(agent_id)
-            await _log_call_to_supabase(call, agent_data["customer_id"])
+            prosody_style = agent_data["agent_config"].get("prosody_style", "warm-conversational")
+            await _log_call_to_supabase(call, agent_data["customer_id"], prosody_style)
         except HTTPException:
             raise
         except Exception as exc:
@@ -280,13 +324,6 @@ async def retell_webhook(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to log call transcript",
             ) from exc
-        finally:
-            # Track 4: always clean up Redis state on call end
-            if conv_state and call_id:
-                try:
-                    await conv_state.clear(call_id)
-                except Exception:
-                    pass  # don't fail the webhook over state cleanup
         return {"status": "logged"}
 
     # ------------------------------------------------------------------

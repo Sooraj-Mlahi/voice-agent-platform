@@ -68,6 +68,15 @@ class AgentConfig(BaseModel):
         le=2,
     )
 
+    # STT — custom vocabulary for domain-specific term recognition
+    custom_vocabulary: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Domain-specific words/phrases to boost STT recognition accuracy "
+            "(e.g. product names, medical terms, brand names)."
+        ),
+    )
+
 
 class CreateCustomerRequest(BaseModel):
     name: str = Field(..., min_length=1)
@@ -110,3 +119,6 @@ class CallLogResponse(BaseModel):
     started_at: str | None
     ended_at: str | None
     cost_usd: float | None
+    latency_p50_ms: int | None
+    tokens_used: int | None
+    prosody_style_used: str | None

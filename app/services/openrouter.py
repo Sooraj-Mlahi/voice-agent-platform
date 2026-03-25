@@ -33,6 +33,9 @@ def _build_headers() -> dict[str, str]:
     }
 
 
+_CONTEXT_WINDOW = 20  # max conversation turns sent to the LLM (10 user + 10 agent)
+
+
 def _build_payload(
     model: str,
     system_prompt: str,
@@ -41,13 +44,17 @@ def _build_payload(
     *,
     stream: bool = False,
 ) -> dict[str, Any]:
+    # Cap the conversation history to the most recent N turns.
+    # Retell sends the full accumulated transcript on every webhook call, so
+    # without a cap a long call could exhaust the model's context and spike costs.
+    windowed = messages[-_CONTEXT_WINDOW:] if len(messages) > _CONTEXT_WINDOW else messages
     return {
         "model": model,
         "temperature": temperature,
         "stream": stream,
         "messages": [
             {"role": "system", "content": system_prompt},
-            *messages,
+            *windowed,
         ],
     }
 
