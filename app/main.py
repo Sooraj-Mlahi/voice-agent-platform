@@ -118,13 +118,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",   # Vite dev server
-        "http://localhost:3000",   # alternative local port
-        "https://voice-agent-platform-front-end.vercel.app",  # production Vercel URL
+        "http://localhost:5173",                                           # Vite dev server
+        "http://localhost:3000",                                           # alternative local port
+        "https://voice-agent-platform-front-end.vercel.app",              # production Vercel frontend
+        "https://voice-agent-platform-production-86a4.up.railway.app",    # Railway — Swagger UI /docs
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "accept", "x-request-id"],
 )
 
 # ---------------------------------------------------------------------------

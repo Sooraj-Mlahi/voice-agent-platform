@@ -304,8 +304,8 @@ async def retell_webhook(
         if conv_state and call_id:
             try:
                 await conv_state.clear(call_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("Redis clear failed for call %s: %s", call_id, exc)
         return {"status": "ok"}
 
     # ------------------------------------------------------------------
@@ -381,8 +381,8 @@ async def retell_webhook(
         if not is_silence_turn and conv_state and call_id:
             try:
                 await conv_state.record_user_turn(call_id)
-            except Exception:
-                pass  # non-fatal
+            except Exception as exc:
+                logger.error("Redis record_user_turn failed for call %s: %s", call_id, exc)
 
         # ── Track 3: stream + sentence detection ─────────────────────
         response_text = await _stream_to_first_sentence(
