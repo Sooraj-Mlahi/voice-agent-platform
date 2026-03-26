@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routers import calls, customers, webhook
+from app.routers import calls, customers, prompt_generator, webhook
 from app.routers.customers import public_router
 
 # ---------------------------------------------------------------------------
@@ -145,6 +145,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 app.include_router(webhook.router)
 app.include_router(customers.router)
 app.include_router(calls.router)
+app.include_router(prompt_generator.router)
 app.include_router(public_router)
 
 
