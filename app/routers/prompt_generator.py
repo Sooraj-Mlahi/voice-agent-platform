@@ -24,7 +24,8 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic.alias_generators import to_camel
 
 from app.auth import get_current_reseller
 from app.services import openrouter
@@ -82,6 +83,12 @@ _META_SYSTEM = (
 # ---------------------------------------------------------------------------
 
 class GeneratePromptRequest(BaseModel):
+    # Accept both snake_case (agent_type) and camelCase (agentType) from the frontend.
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+
     agent_type: str
     company_name: str
     extra_details: str = ""
