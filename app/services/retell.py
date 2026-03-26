@@ -93,6 +93,7 @@ async def _create_retell_llm(
     system_prompt: str,
     model: str = "gpt-4o-mini",
     temperature: float = 0.7,
+    max_tokens: int | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> str:
     """
@@ -100,11 +101,13 @@ async def _create_retell_llm(
     The system_prompt must already be wrapped through prompt_builder.build_prompt()
     before being passed here.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "general_prompt": system_prompt,
         "model": _retell_model(model),
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
 
     async def _post(client: httpx.AsyncClient) -> dict[str, Any]:
         response = await client.post(
@@ -157,6 +160,7 @@ async def create_retell_agent(
         system_prompt=wrapped_prompt,
         model=model,
         temperature=temperature,
+        max_tokens=settings.agent_max_tokens,
         http_client=http_client,
     )
 
@@ -200,6 +204,19 @@ async def create_retell_agent(
         # Nova-2 is Deepgram's highest-accuracy model and handles
         # domain-specific terminology significantly better than the default.
         "asr_model": "deepgram",
+
+        # ── Latency optimisation ──────────────────────────────────────
+        # responsiveness (0.0–1.0): higher = agent fires sooner after the
+        # user stops speaking; 1.0 minimises turn-start delay.
+        "responsiveness": settings.agent_responsiveness,
+
+        # voice_model: eleven_turbo_v2_5 is ~40% lower latency than
+        # eleven_multilingual_v2 at comparable conversational quality.
+        "voice_model": settings.agent_voice_model,
+
+        # normalize_for_speech: Retell pre-normalises numbers, dates,
+        # and abbreviations before sending to TTS, cutting synthesis time.
+        "normalize_for_speech": True,
     }
 
     # Custom vocabulary: boosts recognition of brand names, product terms,
@@ -257,10 +274,15 @@ async def update_retell_agent(
 
     # ── Patch the LLM system prompt ─────────────────────────────────────
     if llm_id:
+        llm_patch: dict[str, Any] = {
+            "general_prompt": wrapped_prompt,
+            "max_tokens": settings.agent_max_tokens,
+        }
+
         async def _patch_llm(client: httpx.AsyncClient) -> None:
             resp = await client.patch(
                 f"{RETELL_BASE_URL}/update-retell-llm/{llm_id}",
-                json={"general_prompt": wrapped_prompt},
+                json=llm_patch,
                 headers=_headers(),
                 timeout=httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0),
             )
@@ -285,6 +307,10 @@ async def update_retell_agent(
         "reminder_trigger_ms": silence_timeout_seconds * 1000,
         "reminder_max_count": settings.max_silence_prompts,
         "end_call_after_silence_ms": 600_000,
+        # Latency optimisation — keep in sync with create_retell_agent
+        "responsiveness": settings.agent_responsiveness,
+        "voice_model": settings.agent_voice_model,
+        "normalize_for_speech": True,
     }
 
     async def _patch_agent(client: httpx.AsyncClient) -> dict[str, Any]:

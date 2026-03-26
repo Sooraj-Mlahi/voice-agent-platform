@@ -23,5 +23,14 @@ class Settings(BaseSettings):
     silence_timeout_seconds: int = 10
     max_silence_prompts: int = 2
 
+    # Latency optimisation knobs (overridable via env without code deploy)
+    # max_tokens caps LLM output length → shorter TTS synthesis time
+    agent_max_tokens: int = 200
+    # responsiveness (0.0–1.0): how quickly agent fires after user stops speaking
+    agent_responsiveness: float = 1.0
+    # ElevenLabs voice model — eleven_turbo_v2_5 is ~40% lower latency than
+    # eleven_multilingual_v2 with comparable quality for conversational use
+    agent_voice_model: str = "eleven_turbo_v2_5"
+
 
 settings = Settings()

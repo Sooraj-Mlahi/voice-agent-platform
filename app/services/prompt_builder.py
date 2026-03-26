@@ -43,10 +43,11 @@ _DEFAULT_STYLE = "warm-conversational"
 _PROSODY_HEADER = """\
 ## Voice Delivery Instructions (for TTS rendering)
 - {tone_line}
-- BREVITY RULE — match your response length to the complexity of the question: \
+- BREVITY RULE — keep every response as short as possible: \
 simple yes/no or single-fact questions get ONE sentence only; \
-multi-step or explanatory answers get TWO to THREE sentences maximum. \
-Never pad a short answer with background context the caller didn't ask for.
+multi-step or explanatory answers get TWO sentences maximum — never three. \
+Never pad a short answer with background context the caller didn't ask for. \
+Short answers reach the caller faster; verbose answers add unnecessary delay.
 - Fillers ("Sure thing,", "Got it,", "Of course,"): use AT MOST ONE per response \
 and only at the opening turn boundary. Never chain fillers (e.g. "Sure thing, \
 absolutely, got it" sounds anxious and unnatural). If the answer can start \
